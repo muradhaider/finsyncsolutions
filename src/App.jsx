@@ -1095,7 +1095,7 @@ function NotFoundPage() {
 
 export default function App() {
   return (
-    <BrowserRouter>
+    <BrowserRouter basename="/finsyncsolutions">
       <AuthProvider>
         <AppShell />
       </AuthProvider>
