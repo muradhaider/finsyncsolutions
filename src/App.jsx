@@ -1,7 +1,16 @@
 // src/App.jsx
-// FinSync Solutions – multi-page prototype with auth + booking + better UX
-// NOTE: Auth & booking are still front-end only (localStorage + hashing).
-// A real production app will need a secure backend, database, and proper auth.
+// FinSync Solutions – prototype with:
+// - Admin & client dashboards
+// - Simulated user accounts in localStorage
+// - Simulated 2FA (email codes), welcome/verification emails
+// - Simulated document exchange (client <-> admin)
+// - Payment tab stub (hook to Stripe/PayPal later)
+//
+// ⚠ IMPORTANT: This is still FRONT-END ONLY.
+// - No real encryption.
+// - No real emails are sent (they're logged to console).
+// - No real payment processing.
+// For production you MUST add a backend (server, DB, email + payments).
 
 import {
   useState,
@@ -19,41 +28,92 @@ import {
   useLocation,
 } from "react-router-dom";
 import { motion } from "framer-motion";
-import logo from "./assets/finsync-logo.png"; // <-- make sure this exists
+import logo from "./assets/finsync-logo.png";
 
-// ---------- Auth context & simple storage helpers ----------
+// ---------- "Backend" simulation helpers (localStorage) ----------
+// In a real backend, all of this would live on the server with a DB,
+// proper encryption, and access controls.
 
-const AuthContext = createContext(null);
+const ADMIN_EMAILS = [
+  "curtis@finsyncsolutions.com",
+  "murad@finsyncsolutions.com",
+].map((e) => e.toLowerCase());
 
-function useAuth() {
-  return useContext(AuthContext);
+function sendEmail(to, subject, body) {
+  // Simulated email. Replace with real email service on backend.
+  console.log("📧 SIMULATED EMAIL", { to, subject, body });
+}
+
+function generateCode() {
+  return Math.floor(100000 + Math.random() * 900000).toString();
 }
 
 function loadUsers() {
   const raw = localStorage.getItem("fs_users");
-  return raw ? JSON.parse(raw) : [];
+  try {
+    const parsed = raw ? JSON.parse(raw) : [];
+    // Backwards compatibility with older structure
+    return parsed.map((u) => ({
+      role: "client",
+      verified: true,
+      welcomeSent: false,
+      ...u,
+      // If their email is an admin email, upgrade role
+      role: ADMIN_EMAILS.includes(u.email?.toLowerCase())
+        ? "admin"
+        : u.role || "client",
+    }));
+  } catch {
+    return [];
+  }
 }
 
 function saveUsers(users) {
   localStorage.setItem("fs_users", JSON.stringify(users));
 }
 
-function loadBookings() {
-  const raw = localStorage.getItem("fs_bookings");
-  return raw ? JSON.parse(raw) : [];
+function getUserByEmail(email) {
+  const users = loadUsers();
+  return users.find(
+    (u) => u.email.toLowerCase() === email.toLowerCase()
+  );
 }
 
-function saveBookings(bookings) {
-  localStorage.setItem("fs_bookings", JSON.stringify(bookings));
+function updateUser(updatedUser) {
+  const users = loadUsers();
+  const next = users.map((u) =>
+    u.id === updatedUser.id ? updatedUser : u
+  );
+  saveUsers(next);
+}
+
+function deleteUser(userId) {
+  const users = loadUsers().filter((u) => u.id !== userId);
+  saveUsers(users);
+  localStorage.removeItem(`fs_docs_${userId}`);
+  localStorage.removeItem(`fs_trusted_${userId}`);
+}
+
+// Documents per user (metadata only)
+function loadDocsForUser(userId) {
+  const raw = localStorage.getItem(`fs_docs_${userId}`);
+  if (!raw) return [];
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return [];
+  }
+}
+
+function saveDocsForUser(userId, docs) {
+  localStorage.setItem(`fs_docs_${userId}`, JSON.stringify(docs));
 }
 
 // Simple password hashing (SHA-256 via Web Crypto).
-// This only protects how passwords are stored locally and does NOT replace
-// proper server-side hashing + TLS for a real production app.
+// Still only client-side, this is NOT a replacement for real backend hashing.
 async function hashPassword(password) {
   try {
     if (!window.crypto?.subtle) {
-      // Fallback – not ideal, but keeps the app running on older browsers.
       return password;
     }
     const enc = new TextEncoder();
@@ -85,6 +145,13 @@ function isPasswordStrong(password) {
   return Object.values(rules).every(Boolean);
 }
 
+// ---------- Auth context ----------
+const AuthContext = createContext(null);
+
+function useAuth() {
+  return useContext(AuthContext);
+}
+
 function AuthProvider({ children }) {
   const [user, setUser] = useState(() => {
     const raw = localStorage.getItem("fs_user");
@@ -108,7 +175,7 @@ function AuthProvider({ children }) {
   );
 }
 
-// Protects routes that need a logged-in user
+// Auth guards
 function RequireAuth({ children }) {
   const { user } = useAuth();
   const location = useLocation();
@@ -124,13 +191,30 @@ function RequireAuth({ children }) {
   return children;
 }
 
+function RequireAdmin({ children }) {
+  const { user } = useAuth();
+  const location = useLocation();
+  if (!user) {
+    return (
+      <Navigate
+        to="/login"
+        state={{ from: location.pathname }}
+        replace
+      />
+    );
+  }
+  if (user.role !== "admin") {
+    return <Navigate to="/" replace />;
+  }
+  return children;
+}
+
 // Utility for date <input>
 function formatDateInput(date) {
   return date.toISOString().slice(0, 10);
 }
 
 // ---------- Layout shell with nav & footer ----------
-
 function AppShell() {
   const { user, logout } = useAuth();
   const navigate = useNavigate();
@@ -149,6 +233,8 @@ function AppShell() {
     navigate("/");
   };
 
+  const isAdmin = user?.role === "admin";
+
   return (
     <div className="app-root">
       <div className="app-bg-grid" />
@@ -157,7 +243,53 @@ function AppShell() {
       <div className="app-shell">
         {/* NAVBAR */}
         <header className="nav">
+          {/* LEFT: Nav links */}
           <div className="nav-left">
+            <button
+              className="nav-link-btn nav-link-btn--subtle"
+              onClick={handleHomeClick}
+            >
+              Home
+            </button>
+            <Link to="/about" className="nav-link">
+              About
+            </Link>
+            <Link to="/contact" className="nav-link">
+              Contact
+            </Link>
+            {user && (
+              <button
+                className="nav-link-btn"
+                onClick={handleClientClick}
+              >
+                Client Dashboard
+              </button>
+            )}
+            {isAdmin && (
+              <Link to="/admin" className="nav-link">
+                Admin
+              </Link>
+            )}
+          </div>
+
+          {/* RIGHT: Brand + auth actions */}
+          <div className="nav-right">
+            {!user && (
+              <button
+                className="nav-link-btn nav-link-btn--primary"
+                onClick={handleClientClick}
+              >
+                Client Login
+              </button>
+            )}
+            {user && (
+              <button
+                className="nav-link-btn nav-link-btn--subtle"
+                onClick={handleLogoutClick}
+              >
+                Logout
+              </button>
+            )}
             <button
               className="nav-logo-btn"
               onClick={handleHomeClick}
@@ -170,35 +302,6 @@ function AppShell() {
               <span className="nav-logo-text">FinSync Solutions</span>
             </button>
           </div>
-
-          <nav className="nav-links">
-            <button
-              className="nav-link-btn"
-              onClick={handleHomeClick}
-            >
-              Home
-            </button>
-            <Link to="/about" className="nav-link">
-              About
-            </Link>
-            <Link to="/contact" className="nav-link">
-              Contact
-            </Link>
-            <button
-              className="nav-link-btn nav-link-btn--primary"
-              onClick={handleClientClick}
-            >
-              {user ? "Client Portal" : "Client Login"}
-            </button>
-            {user && (
-              <button
-                className="nav-link-btn nav-link-btn--subtle"
-                onClick={handleLogoutClick}
-              >
-                Logout
-              </button>
-            )}
-          </nav>
         </header>
 
         {/* MAIN PAGES */}
@@ -209,8 +312,16 @@ function AppShell() {
               path="/client"
               element={
                 <RequireAuth>
-                  <ClientHomePage />
+                  <ClientDashboardPage />
                 </RequireAuth>
+              }
+            />
+            <Route
+              path="/admin"
+              element={
+                <RequireAdmin>
+                  <AdminDashboardPage />
+                </RequireAdmin>
               }
             />
             <Route
@@ -225,6 +336,7 @@ function AppShell() {
             <Route path="/contact" element={<ContactPage />} />
             <Route path="/login" element={<LoginPage />} />
             <Route path="/signup" element={<SignupPage />} />
+            <Route path="/reset-password" element={<ResetPasswordPage />} />
             <Route path="*" element={<NotFoundPage />} />
           </Routes>
         </main>
@@ -240,8 +352,6 @@ function AppShell() {
 }
 
 // ---------- Shared components ----------
-
-// Password input with show/hide and optional rules display
 function PasswordInput({ label, value, onChange, showRequirements }) {
   const [show, setShow] = useState(false);
   const [touched, setTouched] = useState(false);
@@ -306,8 +416,8 @@ function PasswordInput({ label, value, onChange, showRequirements }) {
   );
 }
 
-// Panel used on landing + client home (demo data for now)
-function LandingPanel() {
+// Used as visual business health panel
+function LandingPanel({ titlePrefix = "client-ledger" }) {
   const [activeTab, setActiveTab] = useState("overview");
 
   return (
@@ -319,7 +429,7 @@ function LandingPanel() {
           <span />
         </div>
         <span className="panel-title">
-          finsync@client-ledger • live
+          finsync@{titlePrefix} • live
         </span>
       </div>
 
@@ -341,7 +451,7 @@ function LandingPanel() {
             }
             onClick={() => setActiveTab("cash")}
           >
-            Cash flow
+            Cash-flow
           </button>
           <button
             className={
@@ -362,7 +472,7 @@ function LandingPanel() {
                   Bookkeeping status
                 </span>
                 <span className="metric-value metric-value--good">
-                  ✅ Up to date
+                  ✅ Up-to-date
                 </span>
                 <span className="metric-caption">
                   All bank &amp; card accounts reconciled through last
@@ -398,7 +508,7 @@ function LandingPanel() {
                 ▸ week 01 · +$12,300 · invoices collected
               </p>
               <p className="code-line">
-                ▸ week 02 ·  $8,950 · payroll + rent
+                ▸ week 02 · -$8,950 · payroll + rent
               </p>
               <p className="code-line">
                 ▸ week 03 · +$6,120 · projects closing
@@ -424,7 +534,7 @@ function LandingPanel() {
               </div>
               <div className="alert-row alert-row--warn">
                 <span className="alert-badge alert-badge--warn">
-                  Heads up
+                  Heads-up
                 </span>
                 <span>
                   3 vendor bills approaching due date. Total: $4,870
@@ -450,16 +560,16 @@ function LandingPanel() {
 
 // ---------- Pages ----------
 
-// HOME / LANDING PAGE
+// HOME / LANDING PAGE (marketing)
 function HomePage() {
   const { user } = useAuth();
   const navigate = useNavigate();
 
-  const handleBookCall = () => {
+  const handlePrimary = () => {
     if (user) {
-      navigate("/book-call");
+      navigate("/client");
     } else {
-      navigate("/login", { state: { from: "/book-call" } });
+      navigate("/signup");
     }
   };
 
@@ -476,7 +586,7 @@ function HomePage() {
             Now onboarding new clients
           </span>
           <span className="hero-pill-tag">
-            Sacramento · Remote friendly
+            Sacramento · Remote-friendly
           </span>
         </motion.div>
 
@@ -500,7 +610,7 @@ function HomePage() {
         >
           FinSync Solutions keeps your bookkeeping clean, current and
           understandable. We combine meticulous human bookkeeping with
-          light AI assistance so your statements, cash flow and
+          light AI assistance so your statements, cash-flow and
           spreadsheets stay perfectly aligned – without you wrestling
           with QuickBooks at 11pm.
         </motion.p>
@@ -514,9 +624,9 @@ function HomePage() {
           <button
             type="button"
             className="btn-primary"
-            onClick={handleBookCall}
+            onClick={handlePrimary}
           >
-            Book a 20 minute call
+            {user ? "Go to client dashboard" : "Get started"}
           </button>
           <Link to="/about" className="btn-ghost">
             Learn more
@@ -531,7 +641,7 @@ function HomePage() {
         >
           <span className="hero-footnote-dot" />
           <span>
-            Not a CPA firm – we handle day to day bookkeeping and
+            Not a CPA firm – we handle day-to-day bookkeeping and
             reporting so your CPA can handle tax.
           </span>
         </motion.div>
@@ -549,22 +659,51 @@ function HomePage() {
   );
 }
 
-// CLIENT HOME (after login)
-function ClientHomePage() {
+// CLIENT DASHBOARD (after login)
+function ClientDashboardPage() {
   const { user } = useAuth();
-  const [bookings, setBookings] = useState([]);
-
-  const navigate = useNavigate();
+  const [activeTab, setActiveTab] = useState("health");
+  const [docs, setDocs] = useState([]);
+  const [uploading, setUploading] = useState(false);
+  const [paymentStatus] = useState("unpaid");
 
   useEffect(() => {
-    const all = loadBookings();
-    if (user) {
-      setBookings(all.filter((b) => b.userId === user.id));
+    if (user?.id) {
+      setDocs(loadDocsForUser(user.id));
     }
   }, [user]);
 
-  const goToBooking = () => {
-    navigate("/book-call");
+  const handleFileChange = async (event) => {
+    if (!user?.id) return;
+    const files = Array.from(event.target.files || []);
+    if (!files.length) return;
+
+    setUploading(true);
+    const existing = loadDocsForUser(user.id);
+    const now = new Date().toISOString();
+    const newDocs = files.map((file) => ({
+      id:
+        (crypto.randomUUID && crypto.randomUUID()) ||
+        `${Date.now()}_${file.name}`,
+      name: file.name,
+      size: file.size,
+      type: file.type,
+      uploadedAt: now,
+      uploadedBy: "client",
+    }));
+    const updated = [...existing, ...newDocs];
+    saveDocsForUser(user.id, updated);
+    setDocs(updated);
+    setUploading(false);
+    event.target.value = "";
+  };
+
+  const PAYMENT_LINK_URL = "https://example.com/your-stripe-or-paypal-link";
+
+  const goToPayment = () => {
+    // For now, just open a placeholder link.
+    // Replace PAYMENT_LINK_URL with a real Stripe/PayPal link.
+    window.open(PAYMENT_LINK_URL, "_blank", "noopener,noreferrer");
   };
 
   return (
@@ -572,56 +711,363 @@ function ClientHomePage() {
       <div className="section-header">
         <h2>Welcome back, {user?.fullName || "Client"}.</h2>
         <p>
-          This is your client home. From here you can book or review
-          your 20 minute calls and keep your bookkeeping engagement
-          with FinSync Solutions organized.
+          This is your client dashboard. From here you can review your
+          business health, upload documents securely (prototype), and
+          manage your payment details.
         </p>
       </div>
 
-      <div className="section-grid client-home-grid">
+      <div className="client-tabs">
+        <button
+          className={
+            "client-tab" +
+            (activeTab === "health" ? " client-tab--active" : "")
+          }
+          onClick={() => setActiveTab("health")}
+        >
+          Business health
+        </button>
+        <button
+          className={
+            "client-tab" +
+            (activeTab === "documents" ? " client-tab--active" : "")
+          }
+          onClick={() => setActiveTab("documents")}
+        >
+          Documents
+        </button>
+        <button
+          className={
+            "client-tab" +
+            (activeTab === "payments" ? " client-tab--active" : "")
+          }
+          onClick={() => setActiveTab("payments")}
+        >
+          Payments
+        </button>
+      </div>
+
+      {activeTab === "health" && (
+        <div className="section-grid client-home-grid">
+          <div className="feature-card">
+            <h3>Business overview</h3>
+            {docs.length === 0 ? (
+              <p>
+                No financial data has been uploaded yet. Once your
+                documents are reviewed, your business health summary
+                will appear here.
+              </p>
+            ) : (
+              <p>
+                Based on the documents we&apos;ve received, your
+                bookkeeping status is up-to-date. Detailed reports and
+                adjustments will be uploaded to your Documents tab.
+              </p>
+            )}
+          </div>
+          <div className="client-panel-wrapper">
+            <div className="hero-panel">
+              <LandingPanel titlePrefix={user?.companyName || "books"} />
+            </div>
+          </div>
+        </div>
+      )}
+
+      {activeTab === "documents" && (
+        <div className="section">
+          <div className="section-cols">
+            <div className="copy-block copy-block--card">
+              <h3>Upload documents</h3>
+              <p>
+                Use this area to upload bank statements, tax returns,
+                P&amp;L reports, or other financial documents. In a
+                production system, these would be stored on a secure
+                backend, not in your browser.
+              </p>
+              <label className="field-label">
+                Select files
+                <input
+                  type="file"
+                  multiple
+                  onChange={handleFileChange}
+                  disabled={uploading}
+                  className="field-input"
+                />
+              </label>
+              {uploading && (
+                <p className="booking-note">
+                  Uploading (simulated)... please wait.
+                </p>
+              )}
+            </div>
+            <div className="copy-block copy-block--card">
+              <h3>Your documents</h3>
+              {docs.length === 0 ? (
+                <p>No documents have been uploaded yet.</p>
+              ) : (
+                <ul className="simple-list">
+                  {docs.map((doc) => (
+                    <li key={doc.id}>
+                      <strong>{doc.name}</strong>{" "}
+                      <span>
+                        · {doc.type || "file"} ·{" "}
+                        {Math.round(doc.size / 1024)} KB ·{" "}
+                        {new Date(doc.uploadedAt).toLocaleString()} ·{" "}
+                        {doc.uploadedBy === "admin"
+                          ? "Uploaded by FinSync"
+                          : "Uploaded by you"}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {activeTab === "payments" && (
+        <div className="section section--bordered">
+          <div className="section-cols">
+            <div className="copy-block">
+              <h3>Your plan &amp; billing</h3>
+              <p>
+                This is a placeholder for your payment and subscription
+                status. In production, this would be backed by Stripe
+                or another payment provider and tied to your account.
+              </p>
+              <p>
+                Current plan:{" "}
+                <span className="inline-highlight">
+                  Monthly bookkeeping &amp; reporting
+                </span>
+              </p>
+              <p>Status: {paymentStatus === "unpaid" ? "Unpaid" : "Active"}</p>
+              <button
+                type="button"
+                className="btn-primary auth-btn"
+                onClick={goToPayment}
+              >
+                Go to secure payment
+              </button>
+              <p className="booking-note">
+                Once you integrate Stripe/PayPal, this button should
+                redirect to a real encrypted checkout flow.
+              </p>
+            </div>
+            <div className="copy-block copy-block--card">
+              <h3>Payment receipts (prototype)</h3>
+              <p>
+                In a full implementation, this area could show invoices,
+                payment dates and downloadable receipts generated by
+                your payment processor.
+              </p>
+              <p>
+                For now, this is a design placeholder so you know where
+                that functionality will live.
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
+    </section>
+  );
+}
+
+// ADMIN DASHBOARD
+function AdminDashboardPage() {
+  const { user } = useAuth();
+  const [users, setUsers] = useState([]);
+  const [selectedUserId, setSelectedUserId] = useState(null);
+  const [selectedUserDocs, setSelectedUserDocs] = useState([]);
+  const [adminNote, setAdminNote] = useState("");
+
+  useEffect(() => {
+    setUsers(loadUsers());
+  }, []);
+
+  useEffect(() => {
+    if (selectedUserId) {
+      setSelectedUserDocs(loadDocsForUser(selectedUserId));
+    } else {
+      setSelectedUserDocs([]);
+    }
+  }, [selectedUserId]);
+
+  const isAdminEmail = ADMIN_EMAILS.includes(
+    user?.email?.toLowerCase()
+  );
+
+  const handleSelectUser = (uid) => {
+    setSelectedUserId(uid);
+  };
+
+  const handleDeleteUser = (uid) => {
+    if (
+      !window.confirm(
+        "Are you sure you want to delete this user and their documents? This is irreversible in this prototype."
+      )
+    ) {
+      return;
+    }
+    deleteUser(uid);
+    setUsers(loadUsers());
+    if (selectedUserId === uid) {
+      setSelectedUserId(null);
+      setSelectedUserDocs([]);
+    }
+  };
+
+  const handleUploadAdminDoc = () => {
+    if (!selectedUserId || !adminNote.trim()) return;
+    const docs = loadDocsForUser(selectedUserId);
+    const now = new Date().toISOString();
+    const newDoc = {
+      id:
+        (crypto.randomUUID && crypto.randomUUID()) ||
+        `${Date.now()}_admin`,
+      name: `FinSync summary – ${new Date().toLocaleDateString()}`,
+      size: 0,
+      type: "summary",
+      uploadedAt: now,
+      uploadedBy: "admin",
+      note: adminNote.trim(),
+      adminName: user?.fullName || "FinSync",
+    };
+    const updated = [...docs, newDoc];
+    saveDocsForUser(selectedUserId, updated);
+    setSelectedUserDocs(updated);
+    setAdminNote("");
+  };
+
+  return (
+    <section className="section">
+      <div className="section-header">
+        <h2>Admin dashboard</h2>
+        <p>
+          As an admin you can view the client list, inspect uploaded
+          documents (prototype only), and attach refined summary
+          documents for clients.
+        </p>
+      </div>
+
+      {!isAdminEmail && (
+        <p className="auth-error">
+          Your email is not one of the primary FinSync admin emails
+          (curtis@finsyncsolutions.com or murad@finsyncsolutions.com).
+          Access is restricted in production.
+        </p>
+      )}
+
+      <div className="section-grid">
         <div className="feature-card">
-          <h3>Your upcoming calls</h3>
-          {bookings.length === 0 && (
-            <p>
-              You don&apos;t have any scheduled calls yet. Use the
-              button below to pick a date and time.
-            </p>
-          )}
-          {bookings.length > 0 && (
+          <h3>Client list</h3>
+          {users.length === 0 ? (
+            <p>No users have signed up yet.</p>
+          ) : (
             <ul className="simple-list">
-              {bookings.map((b) => (
-                <li key={b.id}>
-                  {b.date} · {b.time}
+              {users.map((u) => (
+                <li key={u.id}>
+                  <button
+                    type="button"
+                    onClick={() => handleSelectUser(u.id)}
+                    className={
+                      "link-inline" +
+                      (selectedUserId === u.id ? " inline-highlight" : "")
+                    }
+                  >
+                    {u.fullName || u.email}{" "}
+                    {u.companyName ? `· ${u.companyName}` : ""}
+                  </button>{" "}
+                  <span>
+                    ({u.role || "client"} · {u.email})
+                  </span>
+                  {ADMIN_EMAILS.includes(u.email.toLowerCase()) && (
+                    <span> · core admin</span>
+                  )}
+                  {!ADMIN_EMAILS.includes(u.email.toLowerCase()) && (
+                    <>
+                      {" · "}
+                      <button
+                        type="button"
+                        className="link-inline"
+                        onClick={() => handleDeleteUser(u.id)}
+                      >
+                        Delete
+                      </button>
+                    </>
+                  )}
                 </li>
               ))}
             </ul>
           )}
-          <button
-            type="button"
-            className="btn-primary auth-btn"
-            onClick={goToBooking}
-          >
-            Book a 20 minute call
-          </button>
         </div>
 
-        <div className="client-panel-wrapper">
-          <div className="hero-panel">
-            <LandingPanel />
-          </div>
+        <div className="feature-card">
+          <h3>Client documents &amp; summary</h3>
+          {!selectedUserId ? (
+            <p>Select a client to view their documents.</p>
+          ) : (
+            <>
+              {selectedUserDocs.length === 0 ? (
+                <p>This client has no documents uploaded yet.</p>
+              ) : (
+                <ul className="simple-list">
+                  {selectedUserDocs.map((doc) => (
+                    <li key={doc.id}>
+                      <strong>{doc.name}</strong>{" "}
+                      <span>
+                        · {doc.type || "file"} ·{" "}
+                        {doc.uploadedBy === "admin"
+                          ? `Uploaded by ${doc.adminName || "FinSync"}`
+                          : "Uploaded by client"}
+                      </span>
+                      {doc.note && (
+                        <div style={{ fontSize: "0.8rem", marginTop: "0.1rem" }}>
+                          Note: {doc.note}
+                        </div>
+                      )}
+                    </li>
+                  ))}
+                </ul>
+              )}
+              <div style={{ marginTop: "0.7rem" }}>
+                <label className="field-label">
+                  Add summary note for this client
+                  <textarea
+                    className="field-input"
+                    rows={3}
+                    value={adminNote}
+                    onChange={(e) => setAdminNote(e.target.value)}
+                  />
+                </label>
+                <button
+                  type="button"
+                  className="btn-primary auth-btn"
+                  onClick={handleUploadAdminDoc}
+                >
+                  Upload refined summary (prototype)
+                </button>
+                <p className="booking-note">
+                  In production this would upload a real PDF/Excel or
+                  link to generated reports stored on your backend.
+                </p>
+              </div>
+            </>
+          )}
         </div>
       </div>
     </section>
   );
 }
 
-// BOOK A CALL PAGE (requires login)
+// BOOK A CALL PAGE (still available, but not main CTA after login)
 function BookCallPage() {
   const { user } = useAuth();
   const [selectedDate, setSelectedDate] = useState(() =>
     formatDateInput(new Date())
   );
-  const [bookings, setBookings] = useState(() => loadBookings());
+  const [selectedTime, setSelectedTime] = useState("");
   const [message, setMessage] = useState("");
 
   const today = new Date();
@@ -634,7 +1080,6 @@ function BookCallPage() {
     )
   );
 
-  // simple time slots, 9:00–16:30 every 30min
   const timeSlots = [];
   for (let hour = 9; hour <= 16; hour++) {
     ["00", "30"].forEach((mins) => {
@@ -644,40 +1089,30 @@ function BookCallPage() {
     });
   }
 
-  const isTaken = (time) =>
-    bookings.some(
-      (b) => b.date === selectedDate && b.time === time
-    );
-
-  const handleBook = (time) => {
-    if (!user) return;
-    if (isTaken(time)) {
-      setMessage("That slot was just taken. Please choose another.");
+  const handleBook = () => {
+    if (!selectedTime) {
+      setMessage("Please select a time slot.");
       return;
     }
-    const newBooking = {
-      id:
-        (crypto.randomUUID && crypto.randomUUID()) ||
-        Date.now().toString(),
-      userId: user.id,
-      date: selectedDate,
-      time,
-    };
-    const updated = [...bookings, newBooking];
-    setBookings(updated);
-    saveBookings(updated);
+    const when = `${selectedDate} at ${selectedTime}`;
     setMessage(
-      `Booked ${selectedDate} at ${time}. You’ll receive a confirmation email shortly (placeholder).`
+      `Booked ${when}. You would receive a confirmation email in production.`
+    );
+    // Simulated booking confirmation email
+    sendEmail(
+      user?.email || "client@example.com",
+      "Your FinSync call booking",
+      `You booked a 20-minute call on ${when}.`
     );
   };
 
   return (
     <section className="section section--bordered">
       <div className="section-header">
-        <h2>Book a 20 minute call</h2>
+        <h2>Book a 20-minute call (prototype)</h2>
         <p>
-          Choose a date and time that works for you. Each slot can only
-          be booked once, so there&apos;s no double booking.
+          In the future this can be wired to a real calendar integration.
+          For now it demonstrates where call scheduling would live.
         </p>
       </div>
 
@@ -710,33 +1145,37 @@ function BookCallPage() {
 
         <div className="booking-col">
           <div className="slots-grid">
-            {timeSlots.map((time) => {
-              const taken = isTaken(time);
-              return (
-                <button
-                  key={time}
-                  type="button"
-                  className={
-                    "slot-btn" + (taken ? " slot-btn--taken" : "")
-                  }
-                  onClick={() => handleBook(time)}
-                  disabled={taken}
-                >
-                  {time}
-                  {taken && (
-                    <span className="slot-label">Booked</span>
-                  )}
-                </button>
-              );
-            })}
+            {timeSlots.map((time) => (
+              <button
+                key={time}
+                type="button"
+                className={
+                  "slot-btn" +
+                  (selectedTime === time ? " slot-btn--active" : "")
+                }
+                onClick={() => {
+                  setSelectedTime(time);
+                  setMessage("");
+                }}
+              >
+                {time}
+              </button>
+            ))}
           </div>
+          <button
+            type="button"
+            className="btn-primary auth-btn"
+            onClick={handleBook}
+          >
+            Confirm booking
+          </button>
         </div>
       </div>
     </section>
   );
 }
 
-// ABOUT PAGE (outline; content can be expanded later)
+// ABOUT PAGE
 function AboutPage() {
   return (
     <section className="section">
@@ -772,13 +1211,13 @@ function AboutPage() {
           </p>
           <ul className="simple-list">
             <li>
-              <strong>[Curtis]</strong> – background in operations and
+              <strong>Curtis</strong> – background in operations and
               finance, obsessed with clean systems and clear reporting.
             </li>
             <li>
-              <strong>[Murad]</strong> – background in
+              <strong>Murad</strong> – background in
               engineering/automation, focused on blending human judgment
-              with AI assisted workflows.
+              with AI-assisted workflows.
             </li>
           </ul>
           <p>
@@ -798,7 +1237,7 @@ function ContactPage() {
       <div className="section-header">
         <h2>Contact FinSync Solutions</h2>
         <p>
-          Whether you&apos;re exploring a clean up project or ongoing
+          Whether you&apos;re exploring a clean-up project or ongoing
           monthly bookkeeping, you can reach out and we&apos;ll follow
           up within one business day.
         </p>
@@ -830,8 +1269,7 @@ function ContactPage() {
           <div className="contact-row">
             <span className="contact-label">Alternative</span>
             <span>
-              Or log in / sign up and book a 20 minute call directly
-              from your client portal.
+              Or sign up and access your client dashboard directly.
             </span>
           </div>
         </div>
@@ -840,13 +1278,17 @@ function ContactPage() {
   );
 }
 
-// LOGIN PAGE
+// LOGIN PAGE with simulated 2FA & remember device
 function LoginPage() {
   const { user, login } = useAuth();
   const navigate = useNavigate();
   const location = useLocation();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [twoFACode, setTwoFACode] = useState("");
+  const [rememberDevice, setRememberDevice] = useState(false);
+  const [step, setStep] = useState("credentials"); // "credentials" | "2fa"
+  const [pendingUser, setPendingUser] = useState(null);
   const [error, setError] = useState("");
 
   useEffect(() => {
@@ -855,39 +1297,102 @@ function LoginPage() {
     }
   }, [user, navigate]);
 
-  const handleSubmit = async (e) => {
+  const handleSubmitCredentials = async (e) => {
     e.preventDefault();
     setError("");
 
-    const users = loadUsers();
-    const existing = users.find(
-      (u) => u.email.toLowerCase() === email.toLowerCase()
-    );
-
+    const existing = getUserByEmail(email);
     if (!existing) {
       setError("Invalid email or password.");
       return;
     }
 
     const attemptedHash = await hashPassword(password);
-
     const matchesHashed =
       existing.passwordHash &&
       existing.passwordHash === attemptedHash;
     const matchesLegacy =
-      existing.password &&
-      existing.password === password; // fallback for any pre-hash test users
+      existing.password && existing.password === password;
 
     if (!matchesHashed && !matchesLegacy) {
       setError("Invalid email or password.");
       return;
     }
 
+    const trusted =
+      localStorage.getItem(`fs_trusted_${existing.id}`) === "true";
+
+    // Simulate sending verification & welcome if not sent before
+    if (!existing.welcomeSent) {
+      sendEmail(
+        existing.email,
+        "Verify your FinSync Solutions account",
+        "This is where a real verification link would be sent."
+      );
+      sendEmail(
+        "curtis@finsyncsolutions.com",
+        "New FinSync client signup",
+        `${existing.fullName || existing.email} just created an account.`
+      );
+      existing.welcomeSent = true;
+      updateUser(existing);
+    }
+
+    if (trusted) {
+      // Skip 2FA if this device is trusted
+      login({
+        id: existing.id,
+        email: existing.email,
+        fullName: existing.fullName,
+        companyName: existing.companyName,
+        role: existing.role || "client",
+      });
+      const from = location.state?.from || "/client";
+      navigate(from, { replace: true });
+      return;
+    }
+
+    // Generate and "send" 2FA code
+    const code = generateCode();
+    sendEmail(
+      existing.email,
+      "Your FinSync login code",
+      `Your login code is: ${code}`
+    );
+
+    setPendingUser(existing);
+    setTwoFACode("");
+    setStep("2fa");
+    setError("");
+  };
+
+  const handleSubmit2FA = (e) => {
+    e.preventDefault();
+    if (!pendingUser) {
+      setError("Session expired. Please log in again.");
+      setStep("credentials");
+      return;
+    }
+
+    // In a real system, you'd verify this code server-side
+    // and NOT store it client-side. Here we simply accept "123456"
+    // as a dev shortcut or the one we logged to console.
+    if (!twoFACode || twoFACode.length < 6) {
+      setError("Please enter the 6-digit code.");
+      return;
+    }
+
+    // For the prototype, any 6-digit code works; in dev, you can read the console.
+    if (rememberDevice) {
+      localStorage.setItem(`fs_trusted_${pendingUser.id}`, "true");
+    }
+
     login({
-      id: existing.id,
-      email: existing.email,
-      fullName: existing.fullName,
-      companyName: existing.companyName,
+      id: pendingUser.id,
+      email: pendingUser.email,
+      fullName: pendingUser.fullName,
+      companyName: pendingUser.companyName,
+      role: pendingUser.role || "client",
     });
 
     const from = location.state?.from || "/client";
@@ -899,39 +1404,86 @@ function LoginPage() {
     navigate("/signup", { state: { from } });
   };
 
+  const goToReset = () => {
+    navigate("/reset-password");
+  };
+
   return (
     <section className="section">
       <div className="auth-card">
         <h2>Client login</h2>
         <p className="auth-subtitle">
-          Log in to access your client home and booking tools.
+          Log in to access your client dashboard.
         </p>
 
-        <form onSubmit={handleSubmit} className="auth-form">
-          <label className="field-label">
-            Email
-            <input
-              type="email"
-              className="field-input"
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              required
+        {step === "credentials" && (
+          <form
+            onSubmit={handleSubmitCredentials}
+            className="auth-form"
+          >
+            <label className="field-label">
+              Email
+              <input
+                type="email"
+                className="field-input"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                required
+              />
+            </label>
+
+            <PasswordInput
+              label="Password"
+              value={password}
+              onChange={setPassword}
+              showRequirements={false}
             />
-          </label>
 
-          <PasswordInput
-            label="Password"
-            value={password}
-            onChange={setPassword}
-            showRequirements={false}
-          />
+            {error && <div className="auth-error">{error}</div>}
 
-          {error && <div className="auth-error">{error}</div>}
+            <button type="submit" className="btn-primary auth-btn">
+              Continue
+            </button>
+          </form>
+        )}
 
-          <button type="submit" className="btn-primary auth-btn">
-            Log in
-          </button>
-        </form>
+        {step === "2fa" && (
+          <form onSubmit={handleSubmit2FA} className="auth-form">
+            <p className="booking-note">
+              We&apos;ve sent a 6-digit login code to your email
+              (simulated). Enter it below to complete login.
+            </p>
+            <label className="field-label">
+              6-digit code
+              <input
+                type="text"
+                className="field-input"
+                maxLength={6}
+                value={twoFACode}
+                onChange={(e) => setTwoFACode(e.target.value)}
+                required
+              />
+            </label>
+            <label className="field-label" style={{ flexDirection: "row", gap: "0.4rem" }}>
+              <input
+                type="checkbox"
+                checked={rememberDevice}
+                onChange={(e) =>
+                  setRememberDevice(e.target.checked)
+                }
+              />
+              <span style={{ fontSize: "0.82rem" }}>
+                Don&apos;t ask for a code again on this device.
+              </span>
+            </label>
+
+            {error && <div className="auth-error">{error}</div>}
+
+            <button type="submit" className="btn-primary auth-btn">
+              Complete login
+            </button>
+          </form>
+        )}
 
         <p className="auth-footer">
           Don&apos;t have an account yet?{" "}
@@ -941,6 +1493,16 @@ function LoginPage() {
             onClick={goToSignup}
           >
             Sign up
+          </button>
+        </p>
+        <p className="auth-footer">
+          Forgot your password?{" "}
+          <button
+            type="button"
+            className="link-inline"
+            onClick={goToReset}
+          >
+            Reset it
           </button>
         </p>
       </div>
@@ -975,16 +1537,14 @@ function SignupPage() {
       return;
     }
 
-    const users = loadUsers();
-    const existing = users.find(
-      (u) => u.email.toLowerCase() === email.toLowerCase()
-    );
+    const existing = getUserByEmail(email);
     if (existing) {
       setError("An account with that email already exists.");
       return;
     }
 
     const passwordHash = await hashPassword(password);
+    const isAdmin = ADMIN_EMAILS.includes(email.toLowerCase());
 
     const newUser = {
       id:
@@ -993,17 +1553,29 @@ function SignupPage() {
       fullName,
       companyName: companyName || null,
       email,
-      passwordHash, // hashed before storage
+      passwordHash,
+      role: isAdmin ? "admin" : "client",
+      verified: true, // In real app, set to false until email verified.
+      welcomeSent: false,
+      createdAt: new Date().toISOString(),
     };
 
-    const updatedUsers = [...users, newUser];
-    saveUsers(updatedUsers);
+    const users = loadUsers();
+    saveUsers([...users, newUser]);
+
+    // Simulated verification + welcome email
+    sendEmail(
+      email,
+      "Welcome to FinSync Solutions",
+      "Thanks for signing up. This is where a real welcome/verification email would go."
+    );
 
     login({
       id: newUser.id,
       email: newUser.email,
       fullName: newUser.fullName,
       companyName: newUser.companyName,
+      role: newUser.role,
     });
 
     const from = location.state?.from || "/client";
@@ -1015,7 +1587,7 @@ function SignupPage() {
       <div className="auth-card">
         <h2>Create your client account</h2>
         <p className="auth-subtitle">
-          Sign up to access your client portal and booking tools.
+          Sign up to access your client dashboard.
         </p>
 
         <form onSubmit={handleSubmit} className="auth-form">
@@ -1076,6 +1648,98 @@ function SignupPage() {
   );
 }
 
+// RESET PASSWORD PAGE (prototype)
+function ResetPasswordPage() {
+  const navigate = useNavigate();
+  const [email, setEmail] = useState("");
+  const [newPassword, setNewPassword] = useState("");
+  const [message, setMessage] = useState("");
+  const [error, setError] = useState("");
+
+  const handleReset = async (e) => {
+    e.preventDefault();
+    setError("");
+    setMessage("");
+
+    const userRecord = getUserByEmail(email);
+    if (!userRecord) {
+      setError("No account found with that email.");
+      return;
+    }
+
+    if (!isPasswordStrong(newPassword)) {
+      setError("New password does not meet requirements.");
+      return;
+    }
+
+    const passwordHash = await hashPassword(newPassword);
+    userRecord.passwordHash = passwordHash;
+    updateUser(userRecord);
+
+    sendEmail(
+      email,
+      "Your FinSync password was reset",
+      "In a real system this email confirms your password change."
+    );
+
+    setMessage("Password updated. You can now log in.");
+  };
+
+  const goToLogin = () => navigate("/login");
+
+  return (
+    <section className="section">
+      <div className="auth-card">
+        <h2>Reset password</h2>
+        <p className="auth-subtitle">
+          In production, this would come from a secure email link. Here
+          we simulate the same outcome.
+        </p>
+
+        <form onSubmit={handleReset} className="auth-form">
+          <label className="field-label">
+            Account email
+            <input
+              type="email"
+              className="field-input"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              required
+            />
+          </label>
+
+          <PasswordInput
+            label="New password"
+            value={newPassword}
+            onChange={setNewPassword}
+            showRequirements={true}
+          />
+
+          {error && <div className="auth-error">{error}</div>}
+          {message && (
+            <div className="booking-message">{message}</div>
+          )}
+
+          <button type="submit" className="btn-primary auth-btn">
+            Update password
+          </button>
+        </form>
+
+        <p className="auth-footer">
+          Ready to log in?{" "}
+          <button
+            type="button"
+            className="link-inline"
+            onClick={goToLogin}
+          >
+            Back to login
+          </button>
+        </p>
+      </div>
+    </section>
+  );
+}
+
 // NOT FOUND
 function NotFoundPage() {
   return (
@@ -1092,7 +1756,6 @@ function NotFoundPage() {
 }
 
 // ---------- Root App ----------
-
 export default function App() {
   return (
     <BrowserRouter>
